@@ -20,6 +20,35 @@ fi
 NODE_IP_V4=$(curl -s -4 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "")
 NODE_IP_V6=$(curl -s -6 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "")
 
+pasarguard_auto_configuring() {
+    CREATED_AT=$(date +"%Y-%m-%d %H:%M:%S.%6N")
+    HASHED_PASS=$(docker run --rm epicsoft/bcrypt hash $PASARGUARD_PASS 12 2>/dev/null | tail -n1)
+    SOCKET_PATH="/opt/xray-vps-setup/pasarguard_lib/pasarguard.socket"
+    DATABASE_PATH="/opt/xray-vps-setup/pasarguard_lib/db.sqlite3"
+    TIMEOUT=60
+    INTERVAL=1
+
+    apt install -y sqlite3 socat
+    i=0
+    while [ $i -lt $TIMEOUT ]; do
+        if timeout 1 socat -v UNIX-CONNECT:"$SOCKET_PATH" /dev/null >/dev/null 2>&1; then
+            echo "✅ The PasarGuard socket is ready, the setup continues."
+            socket_ready=true
+            break
+        fi
+        sleep $INTERVAL
+        i=$((i + INTERVAL))
+    done
+    if [ $socket_ready == false ]; then
+        echo "❌ The PasarGuard socket is not running."
+        exit 1
+    fi
+
+    sqlite3 $DATABASE_PATH "INSERT INTO admins (username, hashed_password, created_at, is_sudo) VALUES ('xray_admin', '$HASHED_PASS', '$CREATED_AT', 1);"
+    xray_cfg=$(cat /opt/xray-vps-setup/pasarguard/xray_config.json | echo)
+    sqlite3 $DATABASE_PATH "UPDATE core_configs SET config = '$xray_cfg' WHERE id = 1;"
+}
+
 gen_self_signed_cert() {
     local san_entries=("DNS:localhost" "IP:127.0.0.1")
 
@@ -365,6 +394,7 @@ end_script() {
     if [[ "${panel_input,,}" == "pasarguard" ]]; then
         docker run -v /opt/xray-vps-setup/caddy/Caddyfile:/opt/xray-vps-setup/Caddyfile --rm caddy caddy fmt --overwrite /opt/xray-vps-setup/Caddyfile
         docker compose -f /opt/xray-vps-setup/docker-compose.yml up -d
+        pasarguard_auto_configuring
         final_msg="PasarGuard panel location: https://$VLESS_DOMAIN/$PASARGUARD_PATH
 User: xray_admin
 Password: $PASARGUARD_PASS
